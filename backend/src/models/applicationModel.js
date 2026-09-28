@@ -1,5 +1,40 @@
 const { pool } = require('../config/db');
 
+/**
+ * Trip columns joined into application queries.
+ *
+ * Two rules govern this list:
+ *
+ * 1. Schedule columns go through DATE_FORMAT so they arrive as plain strings
+ *    rather than timezone-shifted JS Date objects — see the matching note in
+ *    tripModel.js. pickup_time uses DATE_FORMAT rather than TIME_FORMAT
+ *    because TIME_FORMAT returns NULL for 00:00.
+ *
+ * 2. No address, contact, receiver or OTP column appears here. These queries
+ *    feed a driver's own application list, and pickup details must not reach
+ *    a driver until they have confirmed the trip.
+ */
+const TRIP_JOIN_FIELDS = `
+  t.load_reference,
+  t.fleet_operator_id,
+  t.source,
+  t.destination,
+  t.vehicle_type,
+  t.cargo_type,
+  t.weight_tonnes,
+  t.price,
+  DATE_FORMAT(t.pickup_date, '%Y-%m-%d')   AS pickup_date,
+  DATE_FORMAT(t.pickup_time, '%H:%i')       AS pickup_time,
+  DATE_FORMAT(t.delivery_date, '%Y-%m-%d')  AS delivery_date,
+  t.payment_method,
+  t.payment_status,
+  t.notes,
+  t.status AS trip_status,
+  t.assigned_driver_id,
+  t.confirm_by,
+  t.delivered_at
+`;
+
 class ApplicationModel {
   /**
    * Create an application from an owner driver for a trip
@@ -19,22 +54,14 @@ class ApplicationModel {
    */
   static async findById(id) {
     const [rows] = await pool.execute(
-      `SELECT 
+      `SELECT
         a.id,
         a.trip_id,
         a.owner_driver_id,
         a.status,
         a.rejection_reason,
         a.applied_at,
-        t.load_reference,
-        t.fleet_operator_id,
-        t.source,
-        t.destination,
-        t.vehicle_type,
-        t.cargo_type,
-        t.weight_tonnes,
-        t.price,
-        t.status AS trip_status,
+        ${TRIP_JOIN_FIELDS},
         d.name AS driver_name,
         d.email AS driver_email,
         d.phone_number AS driver_phone
@@ -52,8 +79,8 @@ class ApplicationModel {
    */
   static async findByTripAndDriver(trip_id, owner_driver_id) {
     const [rows] = await pool.execute(
-      `SELECT id, trip_id, owner_driver_id, status, rejection_reason, applied_at 
-       FROM applications 
+      `SELECT id, trip_id, owner_driver_id, status, rejection_reason, applied_at
+       FROM applications
        WHERE trip_id = ? AND owner_driver_id = ?`,
       [trip_id, owner_driver_id]
     );
@@ -61,24 +88,18 @@ class ApplicationModel {
   }
 
   /**
-   * Get all applications submitted by a specific Owner Driver
+   * Get all applications submitted by a specific Owner Driver,
+   * including the trip's schedule, price and payment method
    */
   static async getApplicationsByDriver(owner_driver_id) {
     const query = `
-      SELECT 
+      SELECT
         a.id AS application_id,
         a.trip_id,
         a.status AS application_status,
         a.rejection_reason,
         a.applied_at,
-        t.load_reference,
-        t.source,
-        t.destination,
-        t.vehicle_type,
-        t.cargo_type,
-        t.weight_tonnes,
-        t.price,
-        t.status AS trip_status,
+        ${TRIP_JOIN_FIELDS},
         u.name AS operator_name,
         u.company_name AS operator_company,
         u.phone_number AS operator_phone
@@ -94,22 +115,25 @@ class ApplicationModel {
   }
 
   /**
-   * Get all applicants for a specific trip (for Fleet Operator)
+   * Get all applicants for a specific trip (for Fleet Operator),
+   * with the trip's schedule and payment method attached
    */
   static async getApplicantsByTrip(trip_id) {
     const query = `
-      SELECT 
+      SELECT
         a.id AS application_id,
         a.trip_id,
         a.status AS application_status,
         a.rejection_reason,
         a.applied_at,
+        ${TRIP_JOIN_FIELDS},
         u.id AS driver_id,
         u.name AS driver_name,
         u.email AS driver_email,
         u.phone_number AS driver_phone,
         u.company_name AS driver_company
       FROM applications a
+      JOIN trips t ON a.trip_id = t.id
       JOIN users u ON a.owner_driver_id = u.id
       WHERE a.trip_id = ?
       ORDER BY a.applied_at ASC
@@ -134,49 +158,49 @@ class ApplicationModel {
   }
 
   /**
-   * Accept an applicant with MySQL TRANSACTION:
-   * 1. Set selected application to 'accepted'
-   * 2. Set trip status to 'assigned'
-   * 3. Set all other pending applications for that trip to 'rejected' with reason
+   * Approve an applicant.
+   *
+   * The trip mutation itself lives in TripModel.assignTrip(), which needs a
+   * dedicated connection for its FOR UPDATE lock. This method therefore does
+   * not open a transaction of its own — it verifies the pending state and
+   * returns the ids the caller needs, leaving the atomic work in one place.
    */
-  static async acceptApplicationTransaction(application_id, trip_id) {
-    const connection = await pool.getConnection();
+  static async getPendingContext(application_id) {
+    const [rows] = await pool.execute(
+      `SELECT
+         a.id,
+         a.trip_id,
+         a.status,
+         a.owner_driver_id,
+         t.status AS trip_status,
+         t.fleet_operator_id
+       FROM applications a
+       JOIN trips t ON a.trip_id = t.id
+       WHERE a.id = ?`,
+      [application_id]
+    );
+    return rows[0] || null;
+  }
 
-    try {
-      await connection.beginTransaction();
-
-      // 1. Accept this specific application
-      await connection.execute(
-        `UPDATE applications 
-         SET status = 'accepted' 
-         WHERE id = ?`,
-        [application_id]
-      );
-
-      // 2. Update trip status to 'assigned'
-      await connection.execute(
-        `UPDATE trips 
-         SET status = 'assigned' 
-         WHERE id = ?`,
-        [trip_id]
-      );
-
-      // 3. Reject other applications for this trip with clear explanation
-      await connection.execute(
-        `UPDATE applications 
-         SET status = 'rejected', rejection_reason = 'Trip was assigned to another driver' 
-         WHERE trip_id = ? AND id != ?`,
-        [trip_id, application_id]
-      );
-
-      await connection.commit();
-      return true;
-    } catch (error) {
-      await connection.rollback();
-      throw error;
-    } finally {
-      connection.release();
-    }
+  /**
+   * This driver's accepted application for a trip, used to decide whether the
+   * "Confirm Trip" banner should show.
+   */
+  static async getAcceptedForDriver(application_id) {
+    const [rows] = await pool.execute(
+      `SELECT
+         a.id,
+         a.trip_id,
+         a.status,
+         DATE_FORMAT(t.confirm_by, '%Y-%m-%d %H:%i:%s') AS confirm_by,
+         t.status AS trip_status,
+         t.assigned_driver_id
+       FROM applications a
+       JOIN trips t ON a.trip_id = t.id
+       WHERE a.id = ?`,
+      [application_id]
+    );
+    return rows[0] || null;
   }
 }
 

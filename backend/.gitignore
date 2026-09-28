@@ -2,3 +2,8 @@ node_modules/
 .env
 .DS_Store
 *.log
+
+# Delivery proof photos are user data written at runtime. The directory is
+# recreated on boot by src/middleware/upload.js, so nothing is lost by
+# leaving it out of the repo.
+uploads/

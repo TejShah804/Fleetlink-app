@@ -60,7 +60,45 @@ function requireRole(...roles) {
   };
 }
 
+/**
+ * Attaches req.user when a valid token is present, but lets the request
+ * through when it is absent.
+ *
+ * Used by GET /api/trips/:id. That endpoint is reachable both anonymously
+ * (browse a trip's public details) and with a token (see the full row), so
+ * the handler needs to know who is asking without demanding it. An invalid
+ * token is still rejected outright — a bad credential should not silently
+ * downgrade to an anonymous request.
+ */
+function optionalAuth(req, res, next) {
+  const authHeader = req.headers['authorization'];
+
+  if (!authHeader) {
+    return next();
+  }
+
+  const parts = authHeader.split(' ');
+  if (parts.length !== 2 || parts[0].toLowerCase() !== 'bearer') {
+    return res.status(401).json({
+      success: false,
+      message: 'Invalid authorization format. Format should be: Bearer <token>'
+    });
+  }
+
+  try {
+    req.user = jwt.verify(parts[1], process.env.JWT_SECRET || 'fleetlink_secret_key');
+  } catch (err) {
+    return res.status(403).json({
+      success: false,
+      message: 'Invalid or expired authentication token.'
+    });
+  }
+
+  return next();
+}
+
 module.exports = {
   authenticateToken,
+  optionalAuth,
   requireRole
 };

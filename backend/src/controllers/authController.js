@@ -50,7 +50,16 @@ class AuthController {
         });
       }
 
-      // 2. Validate & normalize role
+      // 2. Validate Indian mobile number (10 digits, starts 6-9)
+      const trimmedPhone = String(actualPhone).trim();
+      if (!/^[6-9]\d{9}$/.test(trimmedPhone)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Please enter a valid 10-digit Indian mobile number.'
+        });
+      }
+
+      // 3. Validate & normalize role
       const normalizedRole = normalizeRole(role);
       if (!normalizedRole) {
         return res.status(400).json({
@@ -59,7 +68,7 @@ class AuthController {
         });
       }
 
-      // 3. Check for existing user by email
+      // 4. Check for existing user by email
       const existingUser = await UserModel.findByEmail(email.trim().toLowerCase());
       if (existingUser) {
         return res.status(409).json({
@@ -68,7 +77,7 @@ class AuthController {
         });
       }
 
-      // 4. ALL roles → interest/lead capture only (no password on Register Interest form)
+      // 5. ALL roles → interest/lead capture only (no password on Register Interest form)
       // Password is optional — if provided, hash it; if not, save without password_hash
       let password_hash = null;
       if (password && password.trim().length >= 6) {
@@ -79,7 +88,7 @@ class AuthController {
       const lead = await UserModel.createLead({
         name: name.trim(),
         email: email.trim().toLowerCase(),
-        phone_number: actualPhone.trim(),
+        phone_number: trimmedPhone,
         company_name: company_name ? company_name.trim() : null,
         message: message ? message.trim() : null,
         role: normalizedRole,
@@ -141,6 +150,28 @@ class AuthController {
         return res.status(401).json({
           success: false,
           message: 'Invalid email or password.'
+        });
+      }
+
+      // Administrators use the admin panel, which is served by a separate API that
+      // signs tokens with a different secret. Verify the credentials here so admins
+      // can use this one sign-in form, but do NOT mint a public API token — the
+      // client completes the hand-off against the admin API instead.
+      if (user.role === 'admin') {
+        return res.status(200).json({
+          success: true,
+          message: 'Admin credentials verified.',
+          adminSignIn: true,
+          user: {
+            id: user.id,
+            name: user.name,
+            email: user.email,
+            phone_number: user.phone_number,
+            phone: user.phone_number,
+            company_name: user.company_name,
+            role: user.role,
+            message: user.message
+          }
         });
       }
 

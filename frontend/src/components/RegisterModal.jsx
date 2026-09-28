@@ -37,6 +37,10 @@ const RegisterModal = ({ isOpen, onClose }) => {
         throw new Error('Please select your role.');
       }
 
+      if (!/^[6-9]\d{9}$/.test(formData.phone.trim())) {
+        throw new Error('Please enter a valid 10-digit Indian mobile number.');
+      }
+
       // Password required for driver or operator
       if ((formData.role === 'driver' || formData.role === 'operator') && (!formData.password || formData.password.length < 6)) {
         throw new Error('Password is required (minimum 6 characters).');
@@ -164,11 +168,15 @@ const RegisterModal = ({ isOpen, onClose }) => {
                 id="phone"
                 name="phone"
                 required
+                inputMode="numeric"
+                maxLength={10}
+                pattern="[6-9][0-9]{9}"
                 value={formData.phone}
                 onChange={handleChange}
-                placeholder="04XX XXX XXX"
+                placeholder="e.g. 98XXXXXXXX"
                 className="w-full px-3 py-2 rounded-md border border-gray-300 focus:ring-2 focus:ring-brand-orange focus:border-brand-orange outline-none transition-all placeholder:text-gray-400 text-sm"
               />
+              <p className="text-[11px] text-gray-400 mt-1">Enter a 10-digit Indian mobile number.</p>
             </div>
 
             {/* Company / Business Name */}

@@ -1,41 +1,133 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import {
-  Truck, MapPin, DollarSign, Search, X, Loader2, CheckCircle,
+  Truck, MapPin, Search, X, Loader2, CheckCircle,
   AlertCircle, Clock, XCircle, ChevronRight, LogOut, LayoutDashboard,
-  FileText, RefreshCw, ChevronDown, Building2, Info, MessageSquare
+  FileText, RefreshCw, ChevronDown, Building2, Info, MessageSquare,
+  IndianRupee, CalendarDays, CreditCard, StickyNote, Lock, CheckCircle2, Timer, Navigation
 } from 'lucide-react';
-import { VEHICLE_TYPES } from './OperatorDashboard';
+import {
+  VEHICLE_TYPES,
+  PAYMENT_METHODS,
+  paymentMethodLabel,
+  paymentMethodStyle
+} from '@/lib/tripOptions';
+import { formatINR, formatTripDate, formatTripTime, todayISODate } from '@/lib/format';
+import {
+  statusLabel,
+  statusStyle,
+  countdownLabel,
+  isConfirmExpired
+} from '@/lib/tripStatus';
+import NotificationBell from '@/components/NotificationBell';
+import ActiveTrip from '@/components/ActiveTrip';
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
 
+const EMPTY_FILTERS = {
+  source: '',
+  destination: '',
+  vehicle_type: '',
+  payment_method: '',
+  pickup_date: ''
+};
+
 // ─── Status Badge ──────────────────────────────────────────────────────────────
+const STATUS_ICONS = {
+  pending: <Clock size={12} />,
+  accepted: <CheckCircle size={12} />,
+  rejected: <XCircle size={12} />,
+  open: <Truck size={12} />,
+  assigned: <CheckCircle size={12} />,
+  confirmed: <CheckCircle size={12} />,
+  in_transit: <Truck size={12} />,
+  delivered: <CheckCircle size={12} />,
+  completed: <CheckCircle size={12} />,
+  cancelled: <XCircle size={12} />
+};
+
 function StatusBadge({ status }) {
-  const styles = {
-    pending:     'bg-yellow-100 text-yellow-700 border-yellow-200',
-    accepted:    'bg-green-100 text-green-700 border-green-200',
-    rejected:    'bg-red-100 text-red-700 border-red-200',
-    open:        'bg-blue-100 text-blue-700 border-blue-200',
-    assigned:    'bg-purple-100 text-purple-700 border-purple-200',
-    in_progress: 'bg-orange-100 text-orange-700 border-orange-200',
-    completed:   'bg-green-100 text-green-700 border-green-200',
-    cancelled:   'bg-gray-100 text-gray-500 border-gray-200',
-  };
-  const icons = {
-    pending:     <Clock size={12} />,
-    accepted:    <CheckCircle size={12} />,
-    rejected:    <XCircle size={12} />,
-    open:        <Truck size={12} />,
-    assigned:    <CheckCircle size={12} />,
-    in_progress: <Truck size={12} />,
-    completed:   <CheckCircle size={12} />,
-    cancelled:   <XCircle size={12} />,
-  };
   return (
-    <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold border ${styles[status] || 'bg-gray-100 text-gray-600 border-gray-200'}`}>
-      {icons[status]}
-      {status?.replace('_', ' ').toUpperCase()}
+    <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold border ${statusStyle(status)}`}>
+      {STATUS_ICONS[status] || null}
+      {statusLabel(status).toUpperCase()}
     </span>
+  );
+}
+
+// ─── Approved Banner ───────────────────────────────────────────────────────────
+/**
+ * Shown on every accepted application whose trip is still awaiting
+ * confirmation. The countdown re-renders on its own interval rather than
+ * polling the server, because the deadline is already in the payload.
+ */
+function ApprovedBanner({ app, onConfirmed }) {
+  const [confirming, setConfirming] = useState(false);
+  const [error, setError] = useState('');
+  const [remaining, setRemaining] = useState(() => countdownLabel(app.confirm_by));
+
+  const { authFetch } = useAuth();
+
+  // Tick every 30s; the label only shows minutes, so finer would be wasted work
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setRemaining(countdownLabel(app.confirm_by));
+    }, 30000);
+    return () => clearInterval(timer);
+  }, [app.confirm_by]);
+
+  const expired = isConfirmExpired(app.confirm_by);
+
+  const handleConfirm = async () => {
+    setConfirming(true);
+    setError('');
+    try {
+      const res = await authFetch(`/trips/${app.trip_id}/confirm`, { method: 'PUT' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || 'Could not confirm this trip.');
+      onConfirmed();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setConfirming(false);
+    }
+  };
+
+  return (
+    <div className="mb-4 p-4 rounded-xl bg-green-50 border border-green-200 flex flex-col sm:flex-row sm:items-center gap-3">
+      <div className="w-10 h-10 rounded-full bg-green-500 flex items-center justify-center text-white shrink-0">
+        <CheckCircle2 size={20} />
+      </div>
+
+      <div className="flex-1 min-w-0">
+        <p className="text-sm font-bold text-green-800">
+          You're approved! Confirm within 2 hours
+        </p>
+        <p className="text-xs text-green-700 mt-0.5">
+          Trip <span className="font-mono font-bold">#{app.load_reference}</span> ·{' '}
+          {app.source} → {app.destination}
+        </p>
+        {error && <p className="text-xs text-red-600 mt-1 font-medium">{error}</p>}
+      </div>
+
+      <div className="flex items-center gap-3 shrink-0">
+        <span className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-bold ${
+          expired ? 'bg-red-100 text-red-700' : 'bg-white text-green-700 border border-green-200'
+        }`}>
+          <Timer size={12} />
+          {expired ? 'Window expired' : `${remaining} left`}
+        </span>
+        <button
+          type="button"
+          onClick={handleConfirm}
+          disabled={confirming || expired}
+          className="px-4 py-2 bg-green-600 text-white text-sm font-bold rounded-lg hover:bg-green-700 transition-colors disabled:opacity-50 flex items-center gap-1.5"
+        >
+          {confirming ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
+          Confirm Trip
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -104,7 +196,7 @@ function RejectionDetailModal({ data, onClose }) {
 }
 
 // ─── Trip Card ─────────────────────────────────────────────────────────────────
-function TripCard({ trip, onApply, applying }) {
+function TripCard({ trip, onApply, applying, alreadyApplied }) {
   const companyName = trip.operator_company || trip.operator_name;
 
   return (
@@ -118,8 +210,8 @@ function TripCard({ trip, onApply, applying }) {
             </span>
           ) : <span />}
           <div className="flex items-center gap-1 text-lg font-bold text-brand-navy">
-            <DollarSign size={16} />
-            {parseFloat(trip.price).toLocaleString('en-AU', { minimumFractionDigits: 2 })}
+            <IndianRupee size={16} className="text-brand-orange" />
+            {formatINR(trip.price)}
           </div>
         </div>
 
@@ -148,8 +240,51 @@ function TripCard({ trip, onApply, applying }) {
                 {trip.weight_tonnes}t
               </span>
             )}
+            {trip.payment_method && (
+              <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded border text-[11px] font-semibold ${paymentMethodStyle(trip.payment_method)}`}>
+                <CreditCard size={10} />
+                {paymentMethodLabel(trip.payment_method)}
+              </span>
+            )}
           </div>
         </div>
+
+        {/* Schedule */}
+        {(trip.pickup_date || trip.delivery_date) && (
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-gray-600 mb-3">
+            {trip.pickup_date && (
+              <span className="flex items-center gap-1">
+                <CalendarDays size={11} className="text-brand-orange" />
+                <span className="text-gray-400">Pickup:</span>
+                <span className="font-semibold text-brand-navy">
+                  {formatTripDate(trip.pickup_date)}
+                  {trip.pickup_time && ` · ${formatTripTime(trip.pickup_time)}`}
+                </span>
+              </span>
+            )}
+            {trip.delivery_date && (
+              <span className="flex items-center gap-1">
+                <CalendarDays size={11} className="text-brand-orange" />
+                <span className="text-gray-400">Delivery:</span>
+                <span className="font-semibold text-brand-navy">{formatTripDate(trip.delivery_date)}</span>
+              </span>
+            )}
+          </div>
+        )}
+
+        {/* Notes / Special Instructions */}
+        {trip.notes && (
+          <div className="flex items-start gap-1.5 text-[11px] text-gray-600 bg-amber-50/70 border border-amber-100 rounded-md px-2.5 py-2 mb-3">
+            <StickyNote size={11} className="text-amber-600 shrink-0 mt-0.5" />
+            <span className="leading-relaxed">{trip.notes}</span>
+          </div>
+        )}
+
+        {/* Privacy: the browse list is cities only */}
+        <p className="flex items-center gap-1.5 text-[11px] text-gray-400 mb-3">
+          <Lock size={11} className="shrink-0" />
+          Full address unlocked after approval.
+        </p>
 
         {/* Company / Operator Info */}
         <div className="text-xs mb-4 pt-2.5 border-t border-gray-100 flex items-start gap-2">
@@ -175,10 +310,12 @@ function TripCard({ trip, onApply, applying }) {
       {/* Apply Button */}
       <button
         onClick={() => onApply(trip.id)}
-        disabled={applying === trip.id}
+        disabled={applying === trip.id || alreadyApplied}
         className="w-full py-2 rounded-lg bg-brand-navy text-white text-sm font-bold hover:bg-brand-navy-mid transition-colors disabled:opacity-60 disabled:cursor-not-allowed flex items-center justify-center gap-2 cursor-pointer"
       >
-        {applying === trip.id ? (
+        {alreadyApplied ? (
+          <><CheckCircle size={15} /> Applied</>
+        ) : applying === trip.id ? (
           <><Loader2 size={15} className="animate-spin" /> Applying...</>
         ) : (
           'Apply Now'
@@ -199,7 +336,8 @@ export default function DriverDashboard() {
   const [trips, setTrips] = useState([]);
   const [tripsLoading, setTripsLoading] = useState(false);
   const [tripsError, setTripsError] = useState('');
-  const [filters, setFilters] = useState({ source: '', destination: '', vehicle_type: '' });
+  const [filters, setFilters] = useState(EMPTY_FILTERS);
+
   const [applying, setApplying] = useState(null); // trip_id being applied to
   const [applyMsg, setApplyMsg] = useState({ type: '', text: '' });
 
@@ -209,6 +347,11 @@ export default function DriverDashboard() {
   const [appsError, setAppsError] = useState('');
   const [selectedRejection, setSelectedRejection] = useState(null);
 
+  // Active Trip (the lifecycle, after confirming)
+  const [activeTrips, setActiveTrips] = useState([]);
+  const [activeLoading, setActiveLoading] = useState(false);
+  const [activeError, setActiveError] = useState('');
+
   // Redirect if not driver
   useEffect(() => {
     if (user && user.role !== 'owner_driver') {
@@ -216,14 +359,16 @@ export default function DriverDashboard() {
     }
   }, [user]);
 
-  const fetchOpenTrips = useCallback(async () => {
-    setTripsLoading(true);
+  const fetchOpenTrips = useCallback(async ({ silent } = {}) => {
+    if (!silent) setTripsLoading(true);
     setTripsError('');
     try {
       const params = new URLSearchParams();
       if (filters.source) params.append('source', filters.source);
       if (filters.destination) params.append('destination', filters.destination);
       if (filters.vehicle_type) params.append('vehicle_type', filters.vehicle_type);
+      if (filters.payment_method) params.append('payment_method', filters.payment_method);
+      if (filters.pickup_date) params.append('pickup_date', filters.pickup_date);
 
       const res = await fetch(`${API_BASE}/trips?${params.toString()}`);
       const data = await res.json();
@@ -231,28 +376,62 @@ export default function DriverDashboard() {
     } catch {
       setTripsError('Failed to load trips. Please try again.');
     } finally {
-      setTripsLoading(false);
+      if (!silent) setTripsLoading(false);
     }
   }, [filters]);
 
-  const fetchMyApplications = useCallback(async () => {
-    setAppsLoading(true);
+  const fetchMyApplications = useCallback(async ({ silent } = {}) => {
+    if (!silent) setAppsLoading(true);
     setAppsError('');
     try {
       const res = await authFetch('/applications/my');
       const data = await res.json();
+      if (!res.ok) throw new Error(data.message || 'Failed to load applications.');
       setMyApps(data.applications || []);
     } catch (err) {
       setAppsError(err.message || 'Failed to load applications.');
     } finally {
-      setAppsLoading(false);
+      if (!silent) setAppsLoading(false);
     }
   }, [authFetch]);
 
+  const fetchActiveTrips = useCallback(async ({ silent } = {}) => {
+    if (!silent) setActiveLoading(true);
+    setActiveError('');
+    try {
+      const res = await authFetch('/trips/active');
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || 'Failed to load active trips.');
+      setActiveTrips(data.trips || []);
+    } catch (err) {
+      setActiveError(err.message || 'Failed to load active trips.');
+    } finally {
+      if (!silent) setActiveLoading(false);
+    }
+  }, [authFetch]);
+
+  const refreshAll = useCallback(
+    (opts) => {
+      fetchMyApplications(opts);
+      fetchActiveTrips(opts);
+    },
+    [fetchMyApplications, fetchActiveTrips]
+  );
+
   useEffect(() => {
-    if (activeTab === 'browse') fetchOpenTrips();
+    fetchOpenTrips();
+    refreshAll();
+  }, [fetchOpenTrips, refreshAll]);
+
+  useEffect(() => {
     if (activeTab === 'applications') fetchMyApplications();
-  }, [activeTab, fetchOpenTrips, fetchMyApplications]);
+  }, [activeTab, fetchMyApplications]);
+
+  // The Active Trip tab owns its own refresh, so a milestone or OTP is
+  // reflected as soon as the driver lands on it
+  useEffect(() => {
+    if (activeTab === 'active') fetchActiveTrips();
+  }, [activeTab, fetchActiveTrips]);
 
   const handleApply = async (tripId) => {
     setApplying(tripId);
@@ -265,7 +444,8 @@ export default function DriverDashboard() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.message);
       setApplyMsg({ type: 'success', text: 'Application submitted successfully! The operator will review your profile.' });
-      fetchOpenTrips(); // refresh
+      fetchMyApplications({ silent: true });
+      fetchOpenTrips({ silent: true });
     } catch (err) {
       setApplyMsg({ type: 'error', text: err.message || 'Could not submit application.' });
     } finally {
@@ -310,12 +490,13 @@ export default function DriverDashboard() {
             <h1 className="text-white font-bold text-base">Driver Dashboard</h1>
           </div>
 
-          {/* User + Logout */}
+          {/* User + Bell + Logout */}
           <div className="flex items-center gap-3">
             <div className="hidden sm:block text-right">
               <p className="text-white text-xs font-semibold truncate max-w-[130px]">{user.name}</p>
               <p className="text-white/50 text-[10px]">Owner Driver</p>
             </div>
+            <NotificationBell />
             <div className="w-8 h-8 rounded-full bg-brand-orange flex items-center justify-center text-white font-bold text-sm shrink-0">
               {user.name?.charAt(0).toUpperCase()}
             </div>
@@ -342,6 +523,17 @@ export default function DriverDashboard() {
           </div>
         </div>
 
+        {/* ── Approved & awaiting confirmation banners ── */}
+        {myApps
+          .filter((app) => app.application_status === 'accepted' && app.trip_status === 'assigned')
+          .map((app) => (
+            <ApprovedBanner
+              key={app.application_id}
+              app={app}
+              onConfirmed={fetchMyApplications}
+            />
+          ))}
+
         {/* Tabs */}
         <div className="flex gap-1 bg-white border border-gray-200 rounded-xl p-1 mb-6 w-fit shadow-sm">
           <button
@@ -354,6 +546,22 @@ export default function DriverDashboard() {
           >
             <Truck size={15} />
             Browse Trips
+          </button>
+          <button
+            onClick={() => setActiveTab('active')}
+            className={`flex items-center gap-2 px-5 py-2 rounded-lg text-sm font-semibold transition-all ${
+              activeTab === 'active'
+                ? 'bg-brand-navy text-white shadow-sm'
+                : 'text-gray-600 hover:bg-gray-100'
+            }`}
+          >
+            <Navigation size={15} />
+            Active Trip
+            {activeTrips.length > 0 && (
+              <span className="bg-brand-orange text-white text-[10px] font-bold rounded-full w-4 h-4 flex items-center justify-center">
+                {activeTrips.length > 9 ? '9+' : activeTrips.length}
+              </span>
+            )}
           </button>
           <button
             onClick={() => setActiveTab('applications')}
@@ -381,7 +589,7 @@ export default function DriverDashboard() {
               <p className="text-xs font-bold text-gray-500 uppercase tracking-wide mb-3 flex items-center gap-1.5">
                 <Search size={12} /> Filter Trips
               </p>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
                 <input
                   type="text"
                   placeholder="Source city..."
@@ -411,15 +619,38 @@ export default function DriverDashboard() {
                     <ChevronDown size={14} />
                   </div>
                 </div>
+                <div className="relative">
+                  <select
+                    value={filters.payment_method}
+                    onChange={(e) => setFilters(f => ({ ...f, payment_method: e.target.value }))}
+                    className="w-full px-3 py-2 rounded-lg border border-gray-300 text-sm focus:ring-2 focus:ring-brand-orange focus:border-brand-orange outline-none bg-white appearance-none pr-8 cursor-pointer"
+                  >
+                    <option value="">Any payment method</option>
+                    {PAYMENT_METHODS.map(method => (
+                      <option key={method.value} value={method.value}>{method.label}</option>
+                    ))}
+                  </select>
+                  <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2.5 text-gray-500">
+                    <ChevronDown size={14} />
+                  </div>
+                </div>
+                <input
+                  type="date"
+                  min={todayISODate()}
+                  value={filters.pickup_date}
+                  onChange={(e) => setFilters(f => ({ ...f, pickup_date: e.target.value }))}
+                  title="Pickup on or after"
+                  className="px-3 py-2 rounded-lg border border-gray-300 text-sm text-gray-600 focus:ring-2 focus:ring-brand-orange focus:border-brand-orange outline-none"
+                />
               </div>
               <div className="flex gap-2 mt-3">
                 <button type="submit" className="px-4 py-2 bg-brand-navy text-white text-sm font-semibold rounded-lg hover:bg-brand-navy-mid transition-colors flex items-center gap-1.5">
                   <Search size={14} /> Search
                 </button>
-                {(filters.source || filters.destination || filters.vehicle_type) && (
+                {Object.values(filters).some(Boolean) && (
                   <button
                     type="button"
-                    onClick={() => { setFilters({ source: '', destination: '', vehicle_type: '' }); }}
+                    onClick={() => setFilters(EMPTY_FILTERS)}
                     className="px-4 py-2 border border-gray-300 text-gray-600 text-sm font-semibold rounded-lg hover:bg-gray-50 transition-colors flex items-center gap-1.5"
                   >
                     <X size={14} /> Clear
@@ -467,12 +698,28 @@ export default function DriverDashboard() {
                 </p>
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                   {trips.map((trip) => (
-                    <TripCard key={trip.id} trip={trip} onApply={handleApply} applying={applying} />
+                    <TripCard
+                      key={trip.id}
+                      trip={trip}
+                      onApply={handleApply}
+                      applying={applying}
+                      alreadyApplied={myApps.some((app) => Number(app.trip_id) === Number(trip.id))}
+                    />
                   ))}
                 </div>
               </>
             )}
           </div>
+        )}
+
+        {/* ── Active Trip Tab ── */}
+        {activeTab === 'active' && (
+          <ActiveTrip
+            trips={activeTrips}
+            loading={activeLoading}
+            error={activeError}
+            onRefresh={() => refreshAll()}
+          />
         )}
 
         {/* ── My Applications Tab ── */}
@@ -531,10 +778,43 @@ export default function DriverDashboard() {
                           </span>
                         )}
                         <span className="flex items-center gap-1 font-bold text-gray-700">
-                          <DollarSign size={11} />
-                          {parseFloat(app.price).toLocaleString('en-AU', { minimumFractionDigits: 2 })}
+                          <IndianRupee size={11} className="text-brand-orange" />
+                          {formatINR(app.price)}
                         </span>
+                        {app.payment_method && (
+                          <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded border text-[11px] font-semibold ${paymentMethodStyle(app.payment_method)}`}>
+                            <CreditCard size={10} />
+                            {paymentMethodLabel(app.payment_method)}
+                          </span>
+                        )}
                       </div>
+                      {(app.pickup_date || app.delivery_date) && (
+                        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-gray-600 mt-2">
+                          {app.pickup_date && (
+                            <span className="flex items-center gap-1">
+                              <CalendarDays size={11} className="text-brand-orange" />
+                              <span className="text-gray-400">Pickup:</span>
+                              <span className="font-semibold text-brand-navy">
+                                {formatTripDate(app.pickup_date)}
+                                {app.pickup_time && ` · ${formatTripTime(app.pickup_time)}`}
+                              </span>
+                            </span>
+                          )}
+                          {app.delivery_date && (
+                            <span className="flex items-center gap-1">
+                              <CalendarDays size={11} className="text-brand-orange" />
+                              <span className="text-gray-400">Delivery:</span>
+                              <span className="font-semibold text-brand-navy">{formatTripDate(app.delivery_date)}</span>
+                            </span>
+                          )}
+                        </div>
+                      )}
+                      {app.notes && (
+                        <div className="flex items-start gap-1.5 text-[11px] text-gray-600 bg-amber-50/70 border border-amber-100 rounded-md px-2.5 py-1.5 mt-2">
+                          <StickyNote size={11} className="text-amber-600 shrink-0 mt-0.5" />
+                          <span className="leading-relaxed">{app.notes}</span>
+                        </div>
+                      )}
                       <div className="flex items-center gap-1.5 text-xs text-gray-600 mt-2">
                         <Building2 size={13} className="text-brand-orange shrink-0" />
                         <span className="text-gray-400">Company:</span>

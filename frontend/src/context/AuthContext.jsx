@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useEffect } from 'react';
+import { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
 
 const AuthContext = createContext(null);
 
@@ -28,7 +28,7 @@ export function AuthProvider({ children }) {
   /**
    * Login with email + password → calls backend, saves token & user
    */
-  const login = async (email, password) => {
+  const login = useCallback(async (email, password) => {
     const res = await fetch(`${API_BASE_URL}/auth/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -40,28 +40,32 @@ export function AuthProvider({ children }) {
       throw new Error(data.message || 'Login failed.');
     }
 
+    // Admin accounts are verified but get no public API token (see AuthController.login),
+    // so there is no public session to persist for them.
+    if (!data.token) return data.user;
+
     localStorage.setItem('fleetlink_token', data.token);
     localStorage.setItem('fleetlink_user', JSON.stringify(data.user));
     setToken(data.token);
     setUser(data.user);
 
     return data.user;
-  };
+  }, []);
 
   /**
    * Clear session
    */
-  const logout = () => {
+  const logout = useCallback(() => {
     localStorage.removeItem('fleetlink_token');
     localStorage.removeItem('fleetlink_user');
     setToken(null);
     setUser(null);
-  };
+  }, []);
 
   /**
    * Make an authenticated fetch to the API
    */
-  const authFetch = async (path, options = {}) => {
+  const authFetch = useCallback(async (path, options = {}) => {
     const res = await fetch(`${API_BASE_URL}${path}`, {
       ...options,
       headers: {
@@ -71,32 +75,31 @@ export function AuthProvider({ children }) {
       }
     });
 
-    // Auto-logout if token expired
-    if (res.status === 401 || res.status === 403) {
-      const data = await res.json();
-      // Only logout on token errors, not role errors
-      if (res.status === 401) {
-        logout();
-      }
+    // Auto-logout only when the session is actually missing/invalid
+    if (res.status === 401) {
+      const data = await res.json().catch(() => ({}));
+      logout();
       throw new Error(data.message || 'Unauthorized');
     }
 
     return res;
-  };
+  }, [token, logout]);
+
+  const value = useMemo(() => ({
+    user,
+    token,
+    loading,
+    login,
+    logout,
+    authFetch,
+    isDriver: user?.role === 'owner_driver',
+    isOperator: user?.role === 'fleet_operator',
+    isLoggedIn: !!user
+  }), [user, token, loading, login, logout, authFetch]);
 
   return (
     <AuthContext.Provider
-      value={{
-        user,
-        token,
-        loading,
-        login,
-        logout,
-        authFetch,
-        isDriver: user?.role === 'owner_driver',
-        isOperator: user?.role === 'fleet_operator',
-        isLoggedIn: !!user
-      }}
+      value={value}
     >
       {children}
     </AuthContext.Provider>

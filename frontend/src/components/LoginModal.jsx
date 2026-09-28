@@ -1,9 +1,11 @@
 import { useState } from 'react';
 import { X, AlertCircle, Loader2, LogIn, Mail, ArrowLeft } from 'lucide-react';
 import { useAuth } from '@/context/AuthContext';
+import { useAdminAuth } from '@/context/AdminAuthContext';
 
 const LoginModal = ({ isOpen, onClose, onSwitchToRegister }) => {
   const { login } = useAuth();
+  const { login: adminLogin } = useAdminAuth();
 
   // Views: 'login' | 'forgot'
   const [view, setView] = useState('login');
@@ -43,7 +45,12 @@ const LoginModal = ({ isOpen, onClose, onSwitchToRegister }) => {
     try {
       const user = await login(email.trim(), password);
 
-      if (user.role === 'owner_driver') {
+      if (user.role === 'admin') {
+        // The admin panel runs on the admin API with its own session, so exchange
+        // the already-verified credentials for a real admin token before entering.
+        await adminLogin(email.trim(), password);
+        window.location.href = '/admin';
+      } else if (user.role === 'owner_driver') {
         window.location.href = '/dashboard/driver';
       } else if (user.role === 'fleet_operator') {
         window.location.href = '/dashboard/operator';
@@ -157,7 +164,7 @@ const LoginModal = ({ isOpen, onClose, onSwitchToRegister }) => {
               </div>
 
               <p className="text-center text-xs text-gray-400">
-                Only Owner Drivers &amp; Fleet Operators can sign in.
+                Only Owner Drivers, Fleet Operators &amp; Admins can sign in.
               </p>
             </form>
 

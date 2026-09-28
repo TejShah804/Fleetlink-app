@@ -1,5 +1,7 @@
 const ApplicationModel = require('../models/applicationModel');
 const TripModel = require('../models/tripModel');
+const NotificationModel = require('../models/notificationModel');
+const { transitionHint } = require('../utils/tripLifecycle');
 
 class ApplicationController {
   /**
@@ -26,7 +28,9 @@ class ApplicationController {
       }
 
       // Check if trip exists
-      const trip = await TripModel.findById(tripId);
+      // The public shape is enough here: a driver must not be able to read a
+      // trip's contacts by probing ids before they are approved.
+      const trip = await TripModel.findByIdPublic(tripId);
       if (!trip) {
         return res.status(404).json({
           success: false,
@@ -62,6 +66,12 @@ class ApplicationController {
         application
       });
     } catch (error) {
+      if (error.code === 'ER_DUP_ENTRY') {
+        return res.status(409).json({
+          success: false,
+          message: 'You have already submitted an application for this trip.'
+        });
+      }
       next(error);
     }
   }
@@ -99,7 +109,7 @@ class ApplicationController {
       }
 
       // Verify trip exists
-      const trip = await TripModel.findById(tripId);
+      const trip = await TripModel.findGuardColumns(tripId);
       if (!trip) {
         return res.status(404).json({
           success: false,
@@ -131,63 +141,88 @@ class ApplicationController {
 
   /**
    * PUT /api/applications/:id/accept
-   * Fleet operator accepts an applicant:
-   * - Marks this application as 'accepted'
-   * - Updates trip status to 'assigned'
-   * - Automatically rejects other pending applicants for this trip
+   * Fleet operator approves an applicant. In one transaction:
+   *   - trip → 'assigned', assigned_driver_id set
+   *   - two random 4-digit OTPs, confirm_by = now + 2 hours
+   *   - this application → accepted, other pending ones → rejected
+   *   - a notification for the driver
    */
   static async acceptApplication(req, res, next) {
     try {
       const applicationId = parseInt(req.params.id, 10);
-      if (isNaN(applicationId)) {
+      if (!Number.isInteger(applicationId) || applicationId <= 0) {
         return res.status(400).json({
           success: false,
           message: 'Invalid application ID parameter.'
         });
       }
 
-      // Find application
-      const application = await ApplicationModel.findById(applicationId);
-      if (!application) {
+      const context = await ApplicationModel.getPendingContext(applicationId);
+      if (!context) {
         return res.status(404).json({
           success: false,
           message: 'Application not found.'
         });
       }
 
-      // Verify fleet operator owns the trip
-      if (application.fleet_operator_id !== req.user.id) {
+      if (context.fleet_operator_id !== req.user.id) {
         return res.status(403).json({
           success: false,
           message: 'Forbidden: You can only accept applicants for trips that you posted.'
         });
       }
 
-      // Check if application is pending
-      if (application.status !== 'pending') {
+      if (context.status !== 'pending') {
         return res.status(400).json({
           success: false,
-          message: `Cannot accept application with status '${application.status}'.`
+          message: `Cannot accept an application with status '${context.status}'.`
         });
       }
 
-      // Check if trip is still open
-      if (application.trip_status !== 'open') {
+      if (context.trip_status !== 'open') {
         return res.status(400).json({
           success: false,
-          message: `Trip is already in '${application.trip_status}' status. It cannot be assigned again.`
+          message: `This trip is already '${context.trip_status.replace(/_/g, ' ')}' and cannot be assigned again.`
         });
       }
 
-      // Execute transaction: accept this app, update trip to 'assigned', reject other applicants
-      await ApplicationModel.acceptApplicationTransaction(applicationId, application.trip_id);
+      const result = await TripModel.assignTrip({
+        trip_id: context.trip_id,
+        application_id: applicationId,
+        driver_id: context.owner_driver_id
+      });
+
+      if (!result.ok) {
+        if (result.reason === 'not_found') {
+          return res.status(404).json({
+            success: false,
+            message: 'Trip not found.'
+          });
+        }
+        return res.status(409).json({
+          success: false,
+          message: `This trip is no longer open. ${transitionHint(result.from)}`
+        });
+      }
+
+      const trip = await TripModel.findByIdForOperator(context.trip_id, req.user.id);
+
+      await NotificationModel.create({
+        user_id: context.owner_driver_id,
+        trip_id: context.trip_id,
+        message: `You are approved for trip #${trip.load_reference}. Confirm within 2 hours.`
+      });
 
       return res.status(200).json({
         success: true,
-        message: 'Applicant accepted successfully. Trip status has been updated to assigned, and other applications have been rejected.',
+        message: `Driver approved. Share the pickup OTP ${result.pickup_otp} and delivery OTP ${result.delivery_otp}. The driver has 2 hours to confirm.`,
         application_id: applicationId,
-        trip_id: application.trip_id,
-        status: 'accepted'
+        trip_id: context.trip_id,
+        status: 'accepted',
+        pickup_otp: result.pickup_otp,
+        delivery_otp: result.delivery_otp,
+        confirm_by: result.confirm_by,
+        trip
       });
     } catch (error) {
       next(error);
